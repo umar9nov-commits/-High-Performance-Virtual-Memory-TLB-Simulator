@@ -5,7 +5,6 @@
 #include<vector>
 #include<queue>
 using namespace std;
-
 struct SystemConfiguration {
     int ramSize;
     int pageSize;
@@ -18,7 +17,6 @@ struct SystemConfiguration {
     int numFrames;
     int offsetBits;
 };
-
 class configurationParser {
 public:
     SystemConfiguration loadConfig(string filename) {
@@ -77,7 +75,7 @@ public:
     }
 
     void printConfig(SystemConfiguration config) {
-        cout << "===== CONFIGURATION =====" << endl;
+        cout << "         CONFIGURATION    " << endl;
         cout << "RAM Size           : " << config.ramSize << " bytes" << endl;
         cout << "Page Size          : " << config.pageSize << " bytes" << endl;
         cout << "TLB Size           : " << config.tlbSize << " entries" << endl;
@@ -198,7 +196,8 @@ private:
     unordered_map<unsigned int, PageTableEntry> pageTable;  //vpn=key
     vector<int> freeframes;
     queue<unsigned int> fifoQueue;  //vpn
-
+    vector<unsigned int> lruList;   //Front of vector  = least recently used page
+    //Back of vector   = most recently used page
 public:
     void initialize(int numberofframes) {
         for (int i=numberofframes-1;i>=0;i--) {
@@ -275,6 +274,78 @@ public:
             return pageTable[vpn].dirty;
         }
         return false;
+    }
+    void updateLRU(unsigned int vpn) {
+        // First remove the VPN if it already exists in lruList
+        for (int i = 0; i < lruList.size(); i++) {
+            if (lruList[i] == vpn) {
+                lruList.erase(lruList.begin() + i);
+                break;
+            }
+        }
+
+        // Add the VPN at the end because it is now most recently used
+        lruList.push_back(vpn);
+    }
+
+    unsigned int getLRUPage() {
+        // The first page is the least recently used page
+        return lruList.front();
+    }
+
+    void removeLRUPage(unsigned int vpn) {
+        for (int i = 0; i < lruList.size(); i++) {
+            if (lruList[i] == vpn) {
+                lruList.erase(lruList.begin() + i);
+                break;
+            }
+        }
+    }
+
+    void printLRUList() {
+        cout << "LRU List: ";
+
+        for (int i = 0; i < lruList.size(); i++) {
+            cout << lruList[i] << " ";
+        }
+
+        cout << endl;
+    }
+    unsigned int getOPTPage(vector<MemoryAccess> allAccesses, int currentIndex, int pageSize) {
+        unsigned int victimVPN = 0;
+        int farthestUse = -1;
+
+        unordered_map<unsigned int, PageTableEntry>::iterator it;
+
+        for (it = pageTable.begin(); it != pageTable.end(); it++) {
+            unsigned int currentVPN = it->first;
+
+            if (it->second.valid == true) {
+                int nextUse = -1;
+
+                for (int i = currentIndex + 1; i < allAccesses.size(); i++) {
+                    AddressParts futureParts;
+                    futureParts.vpn = allAccesses[i].virtualAddress / pageSize;
+                    futureParts.offset = allAccesses[i].virtualAddress % pageSize;
+
+                    if (futureParts.vpn == currentVPN) {
+                        nextUse = i;
+                        break;
+                    }
+                }
+
+                if (nextUse == -1) {
+                    return currentVPN;
+                }
+
+                if (nextUse > farthestUse) {
+                    farthestUse = nextUse;
+                    victimVPN = currentVPN;
+                }
+            }
+        }
+
+        return victimVPN;
     }
 };
 class simulationresults {
@@ -420,133 +491,164 @@ public:
         memoryManager.initialize(config.numFrames);
     }
     void runSimulation(string traceFileName) {
-    ifstream traceFile(traceFileName);
+        ifstream traceFile(traceFileName);
 
-    if (!traceFile.is_open()) {
-        cout << "Trace file does not exist" << endl;
-        return;
-    }
-
-    while (!traceFile.eof()) {
-        traceFile >> ws;
-
-        if (traceFile.eof()) {
-            break;
-        }
-
-        MemoryAccess access = traceParser.readOneAccess(traceFile);
-        stats.incrementtotalnumberofaccesses();
-
-        if (access.operation != 'R' && access.operation != 'W') {
-            cout << "Invalid operation in trace file" << endl;
+        if (!traceFile.is_open()) {
+            cout << "Trace file does not exist" << endl;
             return;
         }
 
-        if (access.operation == 'W') {
-            stats.incrementwriteaccesses();
+        vector<MemoryAccess> allAccesses;
+
+        while (!traceFile.eof()) {
+            traceFile >> ws;
+
+            if (traceFile.eof()) {
+                break;
+            }
+
+            MemoryAccess access = traceParser.readOneAccess(traceFile);
+
+            if (access.operation != 'R' && access.operation != 'W') {
+                cout << "Invalid operation in trace file" << endl;
+                return;
+            }
+
+            allAccesses.push_back(access);
         }
 
-        AddressParts parts = traceParser.splitAddress(access.virtualAddress, config.pageSize);
+        traceFile.close();
+        for (int currentIndex = 0; currentIndex < allAccesses.size(); currentIndex++) {
+            MemoryAccess access = allAccesses[currentIndex];
 
-        cout << "\nOperation      : " << access.operation << endl;
-        cout << "Virtual Address: " << access.virtualAddress << endl;
-        cout << "VPN            : " << parts.vpn << endl;
-        cout << "Offset         : " << parts.offset << endl;
-
-        if (tlbManager.isTLBHit(parts.vpn)) {
-            stats.incrementtlbhits();
-
-            int frame = tlbManager.getFrameNumberFromTLB(parts.vpn);
-            stats.addsimulatedtime(config.tlbLatency + config.ramLatency);
-
-            cout << "TLB Status     : Hit" << endl;
-            cout << "Frame Number   : " << frame << endl;
+            stats.incrementtotalnumberofaccesses();
 
             if (access.operation == 'W') {
-                memoryManager.markdirty(parts.vpn);
+                stats.incrementwriteaccesses();
             }
+
+            AddressParts parts = traceParser.splitAddress(access.virtualAddress, config.pageSize);
+
+            cout << "   Operation      : " << access.operation << endl;
+            cout << "Virtual Address: " << access.virtualAddress << endl;
+            cout << "VPN            : " << parts.vpn << endl;
+            cout << "Offset         : " << parts.offset << endl;
+
+            if (tlbManager.isTLBHit(parts.vpn)) {
+    stats.incrementtlbhits();
+
+    int frame = tlbManager.getFrameNumberFromTLB(parts.vpn);
+    stats.addsimulatedtime(config.tlbLatency + config.ramLatency);
+
+    cout << "TLB Status     : Hit" << endl;
+    cout << "Frame Number   : " << frame << endl;
+
+    memoryManager.updateLRU(parts.vpn);
+
+    if (access.operation == 'W') {
+        memoryManager.markdirty(parts.vpn);
+    }
+}
+else {
+    stats.incrementtlbmisses();
+    cout << "TLB Status     : Miss" << endl;
+
+    if (memoryManager.pagepresent(parts.vpn)) {
+        stats.incrementpagehits();
+
+        int frame = memoryManager.getframenumber(parts.vpn);
+        stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.ramLatency);
+
+        cout << "Page Status    : Page Hit" << endl;
+        cout << "Frame Number   : " << frame << endl;
+
+        memoryManager.updateLRU(parts.vpn);
+        tlbManager.insertIntoTLB(parts.vpn, frame);
+
+        if (access.operation == 'W') {
+            memoryManager.markdirty(parts.vpn);
+        }
+    }
+    else {
+        stats.incrementpagefaults();
+        cout << "Page Status    : Page Fault" << endl;
+
+        if (memoryManager.hasfreeframes()) {
+            int frame = memoryManager.allocateFrame();
+
+            stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.diskReadLatency + config.ramLatency);
+
+            memoryManager.addentryintotable(parts.vpn, frame, access.operation);
+            memoryManager.addtoqueue(parts.vpn);
+            memoryManager.updateLRU(parts.vpn);
+            tlbManager.insertIntoTLB(parts.vpn, frame);
+
+            cout << "Loaded into Frame: " << frame << endl;
         }
         else {
-            stats.incrementtlbmisses();
-            cout << "TLB Status     : Miss" << endl;
+            stats.incrementpagereplacements();
+            unsigned int victimVPN=0;
 
-            if (memoryManager.pagepresent(parts.vpn)) {
-                stats.incrementpagehits();
+            if (config.replacementPolicy == "FIFO") {
+                victimVPN = memoryManager.getFIFOPage();
+                cout << "RAM Full       : FIFO Replacement Needed" << endl;
+            }
+            else if (config.replacementPolicy == "LRU") {
+                victimVPN = memoryManager.getLRUPage();
+                cout << "RAM Full       : LRU Replacement Needed" << endl;
+            }
+            else if (config.replacementPolicy == "OPT") {
+                victimVPN = memoryManager.getOPTPage(allAccesses, currentIndex, config.pageSize);
+                cout << "RAM Full       : OPT Replacement Needed" << endl;
+            }
 
-                int frame = memoryManager.getframenumber(parts.vpn);
-                stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.ramLatency);
+            int victimFrame = memoryManager.getframenumber(victimVPN);
 
-                cout << "Page Status    : Page Hit" << endl;
-                cout << "Frame Number   : " << frame << endl;
+            cout << "Victim VPN     : " << victimVPN << endl;
+            cout << "Victim Frame   : " << victimFrame << endl;
 
-                tlbManager.insertIntoTLB(parts.vpn, frame);
-
-                if (access.operation == 'W') {
-                    memoryManager.markdirty(parts.vpn);
-                }
+            if (memoryManager.isPageDirty(victimVPN)) {
+                cout << "Victim Dirty   : Yes" << endl;
+                stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.diskWriteLatency + config.diskReadLatency + config.ramLatency);
             }
             else {
-                stats.incrementpagefaults();
-                cout << "Page Status    : Page Fault" << endl;
-
-                if (memoryManager.hasfreeframes()) {
-                    int frame = memoryManager.allocateFrame();
-
-                    stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.diskReadLatency + config.ramLatency);
-
-                    memoryManager.addentryintotable(parts.vpn, frame, access.operation);
-                    memoryManager.addtoqueue(parts.vpn);
-                    tlbManager.insertIntoTLB(parts.vpn, frame);
-
-                    cout << "Loaded into Frame: " << frame << endl;
-                }
-                else {
-                    stats.incrementpagereplacements();
-
-                    unsigned int victimVPN = memoryManager.getFIFOPage();
-                    int victimFrame = memoryManager.getframenumber(victimVPN);
-
-                    cout << "RAM Full       : FIFO Replacement Needed" << endl;
-                    cout << "Victim VPN     : " << victimVPN << endl;
-                    cout << "Victim Frame   : " << victimFrame << endl;
-
-                    if (memoryManager.isPageDirty(victimVPN)) {
-                        cout << "Victim Dirty   : Yes" << endl;
-                        stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.diskWriteLatency + config.diskReadLatency + config.ramLatency);
-                    }
-                    else {
-                        cout << "Victim Dirty   : No" << endl;
-                        stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.diskReadLatency + config.ramLatency);
-                    }
-
-                    memoryManager.invalidatepage(victimVPN);
-                    tlbManager.invalidateTLBEntry(victimVPN);
-                    memoryManager.removefifopage();
-
-                    memoryManager.addentryintotable(parts.vpn, victimFrame, access.operation);
-                    memoryManager.addtoqueue(parts.vpn);
-                    tlbManager.insertIntoTLB(parts.vpn, victimFrame);
-
-                    cout << "New Page Loaded into Frame: " << victimFrame << endl;
-                }
+                cout << "Victim Dirty   : No" << endl;
+                stats.addsimulatedtime(config.tlbLatency + config.ramLatency + config.diskReadLatency + config.ramLatency);
             }
+
+            memoryManager.invalidatepage(victimVPN);
+            tlbManager.invalidateTLBEntry(victimVPN);
+
+            if (config.replacementPolicy == "FIFO") {
+                memoryManager.removefifopage();
+            }
+            else if (config.replacementPolicy == "LRU") {
+                memoryManager.removeLRUPage(victimVPN);
+            }
+            else if (config.replacementPolicy == "OPT") {
+                memoryManager.removeLRUPage(victimVPN);
+            }
+
+            memoryManager.addentryintotable(parts.vpn, victimFrame, access.operation);
+            memoryManager.addtoqueue(parts.vpn);
+            memoryManager.updateLRU(parts.vpn);
+            tlbManager.insertIntoTLB(parts.vpn, victimFrame);
+
+            cout << "New Page Loaded into Frame: " << victimFrame << endl;
         }
-        tlbManager.printTLB();
-        cout << "=============================" << endl;
-
-
     }
-
-    traceFile.close();
-
-    stats.calculateeat();
-
-    cout << endl;
-    memoryManager.printPageTable();
-    cout << endl;
-    stats.displaystats();
 }
 
+tlbManager.printTLB();
+memoryManager.printLRUList();
+cout << "=============================" << endl;
+        }
+        stats.calculateeat();
+        cout << endl;
+        memoryManager.printPageTable();
+        cout << endl;
+        stats.displaystats();
+    }
 };
 int main() {
     configurationParser parser;
